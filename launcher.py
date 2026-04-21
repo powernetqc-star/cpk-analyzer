@@ -4,33 +4,37 @@ CPK Analyzer 런처 — PyInstaller exe 진입점
 """
 import sys
 import os
-import subprocess
-import threading
-import time
-import webbrowser
+import multiprocessing
 
-PORT = 8501
+if __name__ == "__main__":
+    multiprocessing.freeze_support()
 
-def open_browser():
-    """서버 시작 후 브라우저 열기"""
-    time.sleep(3)
-    webbrowser.open(f"http://localhost:{PORT}")
+    import threading
+    import time
+    import webbrowser
 
-def main():
-    # PyInstaller로 빌드된 경우 _MEIPASS에 번들 파일 존재
+    PORT = 8501
+
+    # PyInstaller 번들 경로
     if getattr(sys, "_MEIPASS", None):
         app_path = os.path.join(sys._MEIPASS, "app.py")
     else:
         app_path = os.path.join(os.path.dirname(__file__), "app.py")
 
+    # 브라우저 자동 열기
+    def open_browser():
+        time.sleep(3)
+        webbrowser.open(f"http://localhost:{PORT}")
+
     threading.Thread(target=open_browser, daemon=True).start()
 
-    subprocess.run([
-        sys.executable, "-m", "streamlit", "run", app_path,
+    # subprocess 대신 Streamlit 직접 호출 (무한 재실행 방지)
+    sys.argv = [
+        "streamlit", "run", app_path,
         "--server.port", str(PORT),
         "--server.headless", "true",
         "--browser.gatherUsageStats", "false",
-    ])
+    ]
 
-if __name__ == "__main__":
-    main()
+    from streamlit.web import cli as stcli
+    stcli.main()
