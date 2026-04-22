@@ -16,6 +16,7 @@ if os.environ.get("CPK_CHILD") == "1":
 
         sys.argv = [
             "streamlit", "run", app_path,
+            "--global.developmentMode", "false",
             "--server.port", "8501",
             "--server.headless", "true",
             "--server.fileWatcherType", "none",
