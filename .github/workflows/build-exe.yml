@@ -22,7 +22,7 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --noconfirm --onedir --console --name CPK_Analyzer --add-data "app.py;." launcher.py
+          pyinstaller --noconfirm --onedir --console --name CPK_Analyzer --add-data "app.py;." --copy-metadata streamlit --copy-metadata importlib-metadata --collect-all streamlit launcher.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
