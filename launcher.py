@@ -5,43 +5,55 @@ CPK Analyzer 런처 — PyInstaller exe 진입점
 import sys
 import os
 import multiprocessing
+import traceback
 
-# PyInstaller가 exe를 재실행할 때 무한루프 방지
 if os.environ.get("CPK_CHILD") == "1":
-    # 자식 프로세스 → Streamlit 직접 실행
-    if getattr(sys, "_MEIPASS", None):
-        app_path = os.path.join(sys._MEIPASS, "app.py")
-    else:
-        app_path = os.path.join(os.path.dirname(__file__), "app.py")
+    try:
+        if getattr(sys, "_MEIPASS", None):
+            app_path = os.path.join(sys._MEIPASS, "app.py")
+        else:
+            app_path = os.path.join(os.path.dirname(__file__), "app.py")
 
-    sys.argv = [
-        "streamlit", "run", app_path,
-        "--server.port", "8501",
-        "--server.headless", "true",
-        "--browser.gatherUsageStats", "false",
-    ]
-    from streamlit.web import cli as stcli
-    stcli.main()
+        sys.argv = [
+            "streamlit", "run", app_path,
+            "--server.port", "8501",
+            "--server.headless", "true",
+            "--browser.gatherUsageStats", "false",
+        ]
+        from streamlit.web import cli as stcli
+        stcli.main()
+    except Exception:
+        traceback.print_exc()
+        input("\n에러가 발생했습니다. 위 내용을 캡쳐해주세요. Enter를 누르면 종료됩니다...")
 
 elif __name__ == "__main__":
     multiprocessing.freeze_support()
 
-    import subprocess
-    import threading
-    import time
-    import webbrowser
+    try:
+        import subprocess
+        import threading
+        import time
+        import webbrowser
 
-    PORT = 8501
+        PORT = 8501
 
-    def open_browser():
-        time.sleep(4)
-        webbrowser.open(f"http://localhost:{PORT}")
+        print("=" * 50)
+        print("  CPK Analyzer 시작 중...")
+        print("  브라우저가 자동으로 열립니다.")
+        print("  이 창을 닫지 마세요!")
+        print("=" * 50)
 
-    threading.Thread(target=open_browser, daemon=True).start()
+        def open_browser():
+            time.sleep(5)
+            webbrowser.open(f"http://localhost:{PORT}")
 
-    # 환경변수 설정 후 자기 자신을 한 번만 재실행
-    env = os.environ.copy()
-    env["CPK_CHILD"] = "1"
+        threading.Thread(target=open_browser, daemon=True).start()
 
-    exe = sys.executable
-    subprocess.run([exe], env=env)
+        env = os.environ.copy()
+        env["CPK_CHILD"] = "1"
+
+        exe = sys.executable
+        subprocess.run([exe], env=env)
+    except Exception:
+        traceback.print_exc()
+        input("\n에러가 발생했습니다. 위 내용을 캡쳐해주세요. Enter를 누르면 종료됩니다...")
