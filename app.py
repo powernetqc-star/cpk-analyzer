@@ -114,14 +114,18 @@ def parse_sheet(file_bytes: bytes, sheet_name: str):
         return None, "시리얼번호 행을 찾을 수 없습니다."
 
     tests = []
+    skipped = []
     for col in range(header_col + 1, result_col):
         name = str(df.iloc[header_row, col]).strip() if pd.notna(df.iloc[header_row, col]) else ""
         if not name or name == "nan":
             continue
+        raw_max = df.iloc[spec_max_row, col]
+        raw_min = df.iloc[spec_min_row, col]
         try:
-            usl = float(df.iloc[spec_max_row, col])
-            lsl = float(df.iloc[spec_min_row, col])
+            usl = float(raw_max)
+            lsl = float(raw_min)
         except (ValueError, TypeError):
+            skipped.append(f"{name} (Spec 변환 실패: max={raw_max}, min={raw_min})")
             continue
         values = []
         for i in range(data_start_row, len(df)):
@@ -131,12 +135,17 @@ def parse_sheet(file_bytes: bytes, sheet_name: str):
                     values.append(float(v))
                 except (ValueError, TypeError):
                     pass
-        if len(values) >= 2:
-            tests.append({"name": name, "usl": usl, "lsl": lsl, "data": np.array(values)})
+        if len(values) < 2:
+            skipped.append(f"{name} (데이터 부족: {len(values)}개)")
+            continue
+        tests.append({"name": name, "usl": usl, "lsl": lsl, "data": np.array(values)})
 
     if not tests:
-        return None, "분석 가능한 테스트 항목이 없습니다."
-    return tests, None
+        msg = "분석 가능한 테스트 항목이 없습니다."
+        if skipped:
+            msg += "\n건너뛴 항목: " + ", ".join(skipped)
+        return None, msg
+    return tests, skipped if skipped else None
 
 
 # ==========================================================
@@ -385,8 +394,8 @@ def render_copyable_image(png_bytes: bytes, idx: int, cols: int = 2):
     img_w = struct.unpack(">I", png_bytes[16:20])[0]
     img_h = struct.unpack(">I", png_bytes[20:24])[0]
     aspect = img_h / img_w
-    est_col_px = 440 if cols >= 2 else 880
-    iframe_h = int(est_col_px * aspect) + 30
+    est_col_px = 480 if cols >= 2 else 920
+    iframe_h = int(est_col_px * aspect) + 50
 
     html = f"""
     <style>
@@ -482,11 +491,15 @@ def main():
 
     # ── 데이터 파싱 ──
     with st.spinner("데이터 분석 중..."):
-        tests, err = parse_sheet(file_bytes, selected_sheet)
+        tests, info = parse_sheet(file_bytes, selected_sheet)
 
-    if err:
-        st.error(err)
+    if tests is None:
+        st.error(info)
         return
+    if info:  # skipped items
+        with st.expander(f"건너뛴 항목 ({len(info)}개)", expanded=False):
+            for s in info:
+                st.warning(s)
 
     # ── 계산 ──
     all_results = []
