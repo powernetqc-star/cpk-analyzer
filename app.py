@@ -4,7 +4,6 @@ Usage: streamlit run app.py
 """
 
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 from scipy import stats
@@ -18,7 +17,6 @@ from io import BytesIO
 import zipfile
 import xml.etree.ElementTree as ET
 import base64
-import struct
 
 # --------------------------------------------------
 # Monkey-patch openpyxl (일부 엑셀 파일 호환성 문제 해결)
@@ -383,83 +381,47 @@ def fig_to_png(fig, dpi=150) -> bytes:
 
 
 # ==========================================================
-#  4. 클릭 → 클립보드 복사 렌더링
+#  4. 클릭 복사 (Streamlit 네이티브 — PyInstaller 호환)
 # ==========================================================
 
-def render_copyable_image(png_bytes: bytes, idx: int, cols: int = 2):
-    """이미지를 클릭하면 클립보드에 PNG로 복사되는 컴포넌트."""
+# 페이지 로드 시 한 번만 삽입되는 클립보드 복사 JS
+COPY_JS = """
+<script>
+document.addEventListener('click', async function(e) {
+    const img = e.target.closest('img[data-copyable]');
+    if (!img) return;
+    try {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        c.getContext('2d').drawImage(img, 0, 0);
+        const blob = await new Promise(r => c.toBlob(r, 'image/png'));
+        await navigator.clipboard.write([
+            new ClipboardItem({ 'image/png': blob })
+        ]);
+        // 복사 완료 피드백
+        const old = img.style.outline;
+        img.style.outline = '3px solid #0a7';
+        img.title = 'Copied!';
+        setTimeout(() => { img.style.outline = old; img.title = 'Click to copy'; }, 1200);
+    } catch(err) {
+        alert('복사 실패 — Chrome 또는 Edge에서 시도해주세요.');
+    }
+});
+</script>
+"""
+
+
+def render_copyable_image(png_bytes: bytes, test_name: str):
+    """st.image + data-copyable 속성으로 클릭 복사 지원."""
     b64 = base64.b64encode(png_bytes).decode()
-
-    # PNG 헤더에서 크기 추출 → iframe 높이 추정
-    img_w = struct.unpack(">I", png_bytes[16:20])[0]
-    img_h = struct.unpack(">I", png_bytes[20:24])[0]
-    aspect = img_h / img_w
-    est_col_px = 480 if cols >= 2 else 920
-    iframe_h = int(est_col_px * aspect) + 50
-
-    html = f"""
-    <style>
-        * {{ margin:0; padding:0; box-sizing:border-box; }}
-        body {{ overflow:hidden; background:transparent; }}
-        .wrap {{
-            position:relative; cursor:pointer;
-            border-radius:6px; overflow:hidden;
-            border:1px solid #e0e0e0;
-            transition: box-shadow 0.15s;
-        }}
-        .wrap:hover {{ box-shadow: 0 4px 16px rgba(0,0,0,0.15); }}
-        .wrap img {{ width:100%; display:block; }}
-        .hint {{
-            position:absolute; bottom:8px; right:12px;
-            background:rgba(0,0,0,0.55); color:#fff;
-            padding:4px 12px; border-radius:4px; font-size:12px;
-            opacity:0; transition:opacity 0.2s; pointer-events:none;
-        }}
-        .wrap:hover .hint {{ opacity:1; }}
-        .copied {{
-            position:absolute; inset:0;
-            background:rgba(0,0,0,0.45);
-            display:none; justify-content:center; align-items:center;
-            color:#fff; font-size:22px; font-weight:bold;
-            border-radius:6px; letter-spacing:1px;
-        }}
-    </style>
-    <div class="wrap" onclick="copyImg(this)">
-        <img src="data:image/png;base64,{b64}" />
-        <div class="hint">Click to copy</div>
-        <div class="copied">Copied!</div>
-    </div>
-    <script>
-    async function copyImg(el) {{
-        try {{
-            const img = el.querySelector('img');
-            if (!img.complete) return;
-            const c = document.createElement('canvas');
-            c.width = img.naturalWidth;
-            c.height = img.naturalHeight;
-            c.getContext('2d').drawImage(img, 0, 0);
-            const blob = await new Promise(r => c.toBlob(r, 'image/png'));
-            await navigator.clipboard.write([
-                new ClipboardItem({{ 'image/png': blob }})
-            ]);
-            const ov = el.querySelector('.copied');
-            ov.style.display = 'flex';
-            setTimeout(() => ov.style.display = 'none', 1200);
-        }} catch(e) {{
-            const ov = el.querySelector('.copied');
-            ov.textContent = 'Copy failed - use Chrome or Edge';
-            ov.style.fontSize = '14px';
-            ov.style.display = 'flex';
-            setTimeout(() => {{
-                ov.style.display = 'none';
-                ov.textContent = 'Copied!';
-                ov.style.fontSize = '22px';
-            }}, 2000);
-        }}
-    }}
-    </script>
-    """
-    components.html(html, height=iframe_h, scrolling=False)
+    html_img = (
+        f'<img src="data:image/png;base64,{b64}" '
+        f'data-copyable="1" title="Click to copy" '
+        f'style="width:100%;cursor:pointer;border-radius:4px;'
+        f'border:1px solid #e0e0e0;" />'
+    )
+    st.markdown(html_img, unsafe_allow_html=True)
 
 
 # ==========================================================
@@ -540,6 +502,9 @@ def main():
     st.divider()
     st.caption("차트를 클릭하면 클립보드에 복사됩니다. Ctrl+V로 붙여넣기 하세요.")
 
+    # 클립보드 복사 JS 삽입 (한 번만)
+    st.markdown(COPY_JS, unsafe_allow_html=True)
+
     # ── 그래프 생성 ──
     for row_start in range(0, len(tests), cols_per_row):
         grid = st.columns(cols_per_row)
@@ -552,7 +517,7 @@ def main():
             fig = create_capability_chart(t["name"], t["data"], t["usl"], t["lsl"], r)
             png = fig_to_png(fig)
             with grid[col_idx]:
-                render_copyable_image(png, i, cols_per_row)
+                render_copyable_image(png, t["name"])
 
 
 if __name__ == "__main__":
