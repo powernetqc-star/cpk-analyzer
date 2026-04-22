@@ -18,6 +18,7 @@ if os.environ.get("CPK_CHILD") == "1":
             "streamlit", "run", app_path,
             "--server.port", "8501",
             "--server.headless", "true",
+            "--server.fileWatcherType", "none",
             "--browser.gatherUsageStats", "false",
         ]
         from streamlit.web import cli as stcli
