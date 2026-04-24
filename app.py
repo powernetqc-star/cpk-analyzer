@@ -381,6 +381,116 @@ def fig_to_png(fig, dpi=150) -> bytes:
 
 
 # ==========================================================
+#  3-1. 엑셀에 차트 삽입
+# ==========================================================
+
+def insert_charts_to_excel(file_bytes: bytes, chart_pngs: list,
+                           test_names: list) -> tuple:
+    """생성된 차트를 엑셀 CPK 시트의 '공정능력 분포도' 영역에 자동 삽입한다.
+
+    원본 양식(병합 셀)을 유지하면서 열 너비를 균등화하고,
+    각 슬롯에 맞는 크기로 차트를 삽입한다.
+    """
+    from openpyxl import load_workbook
+    from openpyxl.drawing.image import Image as XlImage
+    from openpyxl.drawing.spreadsheet_drawing import TwoCellAnchor, AnchorMarker
+    from openpyxl.utils import get_column_letter
+
+    wb = load_workbook(BytesIO(file_bytes))
+
+    # ── 1) CPK 시트 찾기 ──
+    ws = None
+    for name in wb.sheetnames:
+        if "cpk" in name.lower() or "출력" in name.lower():
+            ws = wb[name]
+            break
+    if ws is None:
+        return None, "CPK 시트를 찾을 수 없습니다."
+
+    # ── 2) "공정능력 분포도" 헤더 찾기 (가장 오른쪽 매치) ──
+    matches = []
+    for row in ws.iter_rows(min_row=1, max_row=30):
+        for cell in row:
+            if cell.value and "공정능력" in str(cell.value):
+                matches.append((cell.row, cell.column))
+    if not matches:
+        return None, "'공정능력 분포도' 텍스트를 찾을 수 없습니다."
+    hdr_row, chart_start_col = max(matches, key=lambda x: x[1])
+
+    # ── 3) 차트 영역 열 수 (병합 헤더 범위) ──
+    n_cols = 1
+    for mc in ws.merged_cells.ranges:
+        if mc.min_row == hdr_row and mc.min_col == chart_start_col:
+            n_cols = mc.max_col - mc.min_col + 1
+            break
+
+    CHART_ROWS = 12
+
+    # ── 4) 열 너비 균등화 (가장 넓은 열 기준) ──
+    widths = []
+    for c in range(n_cols):
+        letter = get_column_letter(chart_start_col + c)
+        w = ws.column_dimensions[letter].width
+        widths.append(w if w is not None else 8.43)
+
+    target_w = max(widths)
+    if target_w < 25:
+        target_w = 25
+    for c in range(n_cols):
+        letter = get_column_letter(chart_start_col + c)
+        ws.column_dimensions[letter].width = target_w
+
+    # ── 5) 기존 이미지 제거 (차트 영역) ──
+    n_groups = -(-len(chart_pngs) // n_cols)  # ceil
+    max_row_clear = hdr_row + n_groups * (1 + CHART_ROWS) + 5
+    col_lo = chart_start_col - 1   # 0-based
+    col_hi = col_lo + n_cols
+    keep = []
+    for img in ws._images:
+        try:
+            a = img.anchor
+            if hasattr(a, "_from"):
+                if (col_lo <= a._from.col < col_hi
+                        and hdr_row - 1 <= a._from.row < max_row_clear):
+                    continue
+        except Exception:
+            pass
+        keep.append(img)
+    ws._images = keep
+
+    # ── 6) 차트 삽입 — TwoCellAnchor로 셀에 정확히 맞춤 ──
+    for i, (png, name) in enumerate(zip(chart_pngs, test_names)):
+        col_off = i % n_cols
+        group = i // n_cols
+        col = chart_start_col + col_off
+        title_row = hdr_row + 1 + group * (1 + CHART_ROWS)
+        chart_row = title_row + 1
+
+        # 타이틀
+        ws.cell(row=title_row, column=col, value=name)
+
+        # 이미지 — TwoCellAnchor + 패딩으로 셀 안에 여유 있게 배치
+        PAD = 57150   # 약 6px 여백 (1px = 9525 EMU)
+        img = XlImage(BytesIO(png))
+        anchor = TwoCellAnchor()
+        anchor._from = AnchorMarker(
+            col=col - 1, colOff=PAD,        # 왼쪽 여백
+            row=chart_row - 1, rowOff=PAD,   # 위쪽 여백
+        )
+        anchor.to = AnchorMarker(
+            col=col, colOff=-PAD,            # 오른쪽 여백
+            row=chart_row - 1 + CHART_ROWS, rowOff=-PAD,  # 아래쪽 여백
+        )
+        img.anchor = anchor
+        ws.add_image(img)
+
+    out = BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out.getvalue(), None
+
+
+# ==========================================================
 #  4. 클릭 복사 (Streamlit 네이티브 — PyInstaller 호환)
 # ==========================================================
 
@@ -439,52 +549,73 @@ def main():
 
         if uploaded is None:
             st.info("엑셀 파일을 업로드하세요.")
+            st.session_state.pop("cpk", None)
+            st.session_state.pop("excel_out", None)
             return
 
-        file_bytes = uploaded.read()
+        file_bytes = uploaded.getvalue()
         sheet_names = get_sheet_names(file_bytes)
         selected_sheet = st.selectbox("시트 선택", sheet_names)
         cols_per_row = st.radio("그래프 배치", [1, 2], index=1, horizontal=True)
         run = st.button("분석 시작", type="primary", use_container_width=True)
 
-    if not run:
+    # ── 분석 실행 ──
+    if run:
+        with st.spinner("데이터 분석 중..."):
+            tests, info = parse_sheet(file_bytes, selected_sheet)
+
+        if tests is None:
+            st.error(info)
+            return
+
+        chart_pngs = []
+        summary_rows = []
+        for t in tests:
+            r = calculate_capability(t["data"], t["usl"], t["lsl"])
+            fig = create_capability_chart(t["name"], t["data"], t["usl"], t["lsl"], r)
+            chart_pngs.append(fig_to_png(fig))
+            summary_rows.append({
+                "테스트": t["name"][:55],
+                "N": r["n"],
+                "평균": f"{r['mean']:.4f}",
+                "Cp": f"{r['cp']:.2f}",
+                "Cpk": f"{r['cpk']:.2f}",
+                "Pp": f"{r['pp']:.2f}",
+                "Ppk": f"{r['ppk']:.2f}",
+                "판정": "PASS" if r["cpk"] >= 1.33 else "FAIL",
+            })
+
+        st.session_state["cpk"] = {
+            "names": [t["name"] for t in tests],
+            "pngs": chart_pngs,
+            "summary": summary_rows,
+            "info": info,
+            "cols": cols_per_row,
+        }
+        st.session_state.pop("excel_out", None)
+
+    # ── 결과 표시 ──
+    if "cpk" not in st.session_state:
         st.info("사이드바에서 파일을 업로드하고 '분석 시작'을 누르세요.")
         return
 
-    # ── 데이터 파싱 ──
-    with st.spinner("데이터 분석 중..."):
-        tests, info = parse_sheet(file_bytes, selected_sheet)
+    ctx = st.session_state["cpk"]
+    names = ctx["names"]
+    chart_pngs = ctx["pngs"]
+    summary_rows = ctx["summary"]
+    info = ctx["info"]
+    cpr = ctx["cols"]
 
-    if tests is None:
-        st.error(info)
-        return
-    if info:  # skipped items
+    if info:
         with st.expander(f"건너뛴 항목 ({len(info)}개)", expanded=False):
             for s in info:
                 st.warning(s)
-
-    # ── 계산 ──
-    all_results = []
-    summary_rows = []
-    for t in tests:
-        r = calculate_capability(t["data"], t["usl"], t["lsl"])
-        all_results.append(r)
-        summary_rows.append({
-            "테스트": t["name"][:55],
-            "N": r["n"],
-            "평균": f"{r['mean']:.4f}",
-            "Cp": f"{r['cp']:.2f}",
-            "Cpk": f"{r['cpk']:.2f}",
-            "Pp": f"{r['pp']:.2f}",
-            "Ppk": f"{r['ppk']:.2f}",
-            "판정": "PASS" if r["cpk"] >= 1.33 else "FAIL",
-        })
 
     # ── 요약 ──
     n_pass = sum(1 for s in summary_rows if s["판정"] == "PASS")
     n_fail = len(summary_rows) - n_pass
     col_a, col_b, col_c = st.columns(3)
-    col_a.metric("전체 항목", f"{len(tests)}개")
+    col_a.metric("전체 항목", f"{len(names)}개")
     col_b.metric("PASS", f"{n_pass}개")
     col_c.metric("FAIL", f"{n_fail}개")
 
@@ -505,19 +636,38 @@ def main():
     # 클립보드 복사 JS 삽입 (한 번만)
     st.markdown(COPY_JS, unsafe_allow_html=True)
 
-    # ── 그래프 생성 ──
-    for row_start in range(0, len(tests), cols_per_row):
-        grid = st.columns(cols_per_row)
-        for col_idx in range(cols_per_row):
+    # ── 그래프 표시 ──
+    for row_start in range(0, len(names), cpr):
+        grid = st.columns(cpr)
+        for col_idx in range(cpr):
             i = row_start + col_idx
-            if i >= len(tests):
+            if i >= len(names):
                 break
-            t = tests[i]
-            r = all_results[i]
-            fig = create_capability_chart(t["name"], t["data"], t["usl"], t["lsl"], r)
-            png = fig_to_png(fig)
             with grid[col_idx]:
-                render_copyable_image(png, t["name"])
+                render_copyable_image(chart_pngs[i], names[i])
+
+    # ── 엑셀 차트 삽입 ──
+    st.divider()
+    st.subheader("엑셀에 차트 삽입")
+    st.caption("업로드한 엑셀의 CPK 시트 '공정능력 분포도' 영역에 차트를 자동 삽입합니다.")
+
+    if st.button("차트 삽입 실행", type="primary"):
+        with st.spinner("엑셀 파일 처리 중... (대용량 파일은 시간이 걸릴 수 있습니다)"):
+            result, err = insert_charts_to_excel(file_bytes, chart_pngs, names)
+        if err:
+            st.error(err)
+        else:
+            st.session_state["excel_out"] = result
+            st.success("차트 삽입 완료!")
+
+    if "excel_out" in st.session_state:
+        out_name = uploaded.name if uploaded else "CPK_result.xlsx"
+        st.download_button(
+            "수정된 엑셀 다운로드",
+            st.session_state["excel_out"],
+            file_name=out_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 
 if __name__ == "__main__":
