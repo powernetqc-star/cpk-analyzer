@@ -424,7 +424,14 @@ def insert_charts_to_excel(file_bytes: bytes, chart_pngs: list,
             n_cols = mc.max_col - mc.min_col + 1
             break
 
-    CHART_ROWS = 12
+    # ── 차트 행 수 자동 감지 (병합 셀에서 추출) ──
+    CHART_ROWS = 12  # 기본값
+    first_chart_row = hdr_row + 2  # 헤더 → 타이틀 → 첫 차트 행
+    for mc in ws.merged_cells.ranges:
+        if (mc.min_col == chart_start_col
+                and mc.min_row == first_chart_row):
+            CHART_ROWS = mc.max_row - mc.min_row + 1
+            break
 
     # ── 4) 열 너비 균등화 (가장 넓은 열 기준) ──
     widths = []
