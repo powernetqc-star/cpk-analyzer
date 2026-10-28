@@ -85,7 +85,18 @@ Spec 변환 실패 또는 데이터 부족으로 건너뛴 항목은 UI에 표�
 
 ---
 
-## 7. openpyxl 호환성
+## 7. 읽기 엔진 — calamine
+
+시트 값을 읽을 때는 `pandas.read_excel(engine="calamine")` 을 사용한다.
+
+- openpyxl은 값만 필요해도 서식(`styles.xml`)과 외부 링크를 전부 파싱한다.
+  MVT 체크리스트처럼 셀 스타일이 수만 개 누적된 파일은 시트 하나 읽는 데 약 10초가 걸린다.
+- calamine(Rust)은 같은 시트를 약 0.1초에 읽고, 값은 openpyxl과 동일함을 확인했다.
+- `.xls` 도 calamine이 그대로 읽는다.
+- python-calamine 이 없으면 openpyxl 로 자동 폴백한다.
+- 엑셀에 차트를 **쓰는** 기능(`insert_charts_to_excel`)은 계속 openpyxl을 사용한다.
+
+## 8. openpyxl 호환성
 
 일부 엑셀 파일에서 `CustomPropertyList.from_tree`가 TypeError를 발생시킴.
 monkey-patch로 해결:

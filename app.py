@@ -53,24 +53,42 @@ st.markdown("""
 #  1. 데이터 파싱
 # ==========================================================
 
+# 읽기 전용 작업은 calamine(Rust) 엔진을 쓴다.
+# openpyxl은 셀 값만 필요해도 서식(styles.xml)·외부 링크를 전부 파싱해서
+# 스타일이 수만 개 누적된 체크리스트 파일은 시트 하나 읽는 데 10초 가까이 걸린다.
+# calamine은 같은 시트를 0.2초에 읽고 값은 동일하다(검증 완료).
+# 쓰기(엑셀 차트 삽입)는 계속 openpyxl을 사용한다.
+READ_ENGINE = "calamine"
+
+
+def _read_sheet(file_bytes: bytes, sheet_name) -> pd.DataFrame:
+    try:
+        return pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name,
+                             header=None, engine=READ_ENGINE)
+    except ImportError:
+        return pd.read_excel(BytesIO(file_bytes), sheet_name=sheet_name,
+                             header=None, engine="openpyxl")
+
+
 def get_sheet_names(file_bytes: bytes) -> list[str]:
     """엑셀 파일에서 시트 이름 목록을 가져온다."""
     try:
-        xls = pd.ExcelFile(BytesIO(file_bytes), engine="openpyxl")
+        xls = pd.ExcelFile(BytesIO(file_bytes), engine=READ_ENGINE)
         return xls.sheet_names
     except Exception:
+        pass
+    try:
         z = zipfile.ZipFile(BytesIO(file_bytes))
         tree = ET.parse(z.open("xl/workbook.xml"))
         ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
         return [s.attrib["name"] for s in tree.findall(".//m:sheet", ns)]
+    except Exception:
+        return pd.ExcelFile(BytesIO(file_bytes), engine="openpyxl").sheet_names
 
 
 def parse_sheet(file_bytes: bytes, sheet_name: str):
     """시트를 파싱하여 테스트 항목 리스트를 반환한다."""
-    df = pd.read_excel(
-        BytesIO(file_bytes), sheet_name=sheet_name,
-        header=None, engine="openpyxl",
-    )
+    df = _read_sheet(file_bytes, sheet_name)
 
     header_row = header_col = None
     for i in range(min(15, len(df))):

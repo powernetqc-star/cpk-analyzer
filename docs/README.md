@@ -14,7 +14,7 @@
 | 구분 | 기술 | 역할 |
 |------|------|------|
 | 프레임워크 | Streamlit | 웹 UI |
-| 데이터 처리 | pandas, openpyxl | 엑셀 파싱 |
+| 데이터 처리 | pandas, python-calamine (읽기), openpyxl (쓰기) | 엑셀 파싱 / 차트 삽입 |
 | 수학/통계 | numpy, scipy | 공정능력 지수 계산 |
 | 차트 | matplotlib | 미니탭 스타일 그래프 |
 | 배포 | PyInstaller + GitHub Actions | Windows exe 빌드 |

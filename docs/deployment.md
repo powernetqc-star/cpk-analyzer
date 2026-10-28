@@ -55,6 +55,7 @@ jobs:
           --collect-all streamlit
           --collect-submodules scipy
           --collect-data matplotlib
+          --hidden-import python_calamine
           launcher.py
       - name: Upload artifact
         uses: actions/upload-artifact@v4
