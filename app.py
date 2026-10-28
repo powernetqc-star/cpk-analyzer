@@ -13,6 +13,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from matplotlib.lines import Line2D
+from matplotlib.ticker import MaxNLocator
 from io import BytesIO
 import zipfile
 import xml.etree.ElementTree as ET
@@ -83,13 +84,15 @@ def parse_sheet(file_bytes: bytes, sheet_name: str):
     if header_row is None:
         return None, "'측정항목' 행을 찾을 수 없습니다."
 
-    spec_max_row = spec_min_row = None
+    spec_max_row = spec_min_row = target_row = None
     for i in range(header_row + 1, min(header_row + 12, len(df))):
         cell = str(df.iloc[i, header_col]).strip().lower() if pd.notna(df.iloc[i, header_col]) else ""
         if spec_max_row is None and ("spec max" in cell or cell == "max"):
             spec_max_row = i
         elif spec_min_row is None and ("spec min" in cell or cell == "min"):
             spec_min_row = i
+        elif target_row is None and "target" in cell:
+            target_row = i
     if spec_max_row is None or spec_min_row is None:
         return None, "Spec max / Spec min 행을 찾을 수 없습니다."
 
@@ -125,6 +128,15 @@ def parse_sheet(file_bytes: bytes, sheet_name: str):
         except (ValueError, TypeError):
             skipped.append(f"{name} (Spec 변환 실패: max={raw_max}, min={raw_min})")
             continue
+        # Target: 엑셀에 'Target' 행이 있으면 그 값, 없거나 비어 있으면 None → 중앙값 사용
+        target = None
+        if target_row is not None:
+            try:
+                target = float(df.iloc[target_row, col])
+                if not np.isfinite(target):
+                    target = None
+            except (ValueError, TypeError):
+                target = None
         values = []
         for i in range(data_start_row, len(df)):
             v = df.iloc[i, col]
@@ -136,7 +148,8 @@ def parse_sheet(file_bytes: bytes, sheet_name: str):
         if len(values) < 2:
             skipped.append(f"{name} (데이터 부족: {len(values)}개)")
             continue
-        tests.append({"name": name, "usl": usl, "lsl": lsl, "data": np.array(values)})
+        tests.append({"name": name, "usl": usl, "lsl": lsl, "target": target,
+                      "data": np.array(values)})
 
     if not tests:
         msg = "분석 가능한 테스트 항목이 없습니다."
@@ -150,10 +163,12 @@ def parse_sheet(file_bytes: bytes, sheet_name: str):
 #  2. 공정능력 계산 (미니탭 동일 방식)
 # ==========================================================
 
-def calculate_capability(data: np.ndarray, usl: float, lsl: float) -> dict:
+def calculate_capability(data: np.ndarray, usl: float, lsl: float,
+                         target: float | None = None) -> dict:
     n = len(data)
     mean = np.mean(data)
-    target = (usl + lsl) / 2.0
+    if target is None:
+        target = (usl + lsl) / 2.0
 
     stdev_overall = np.std(data, ddof=1)
 
@@ -198,90 +213,106 @@ def calculate_capability(data: np.ndarray, usl: float, lsl: float) -> dict:
 
 
 # ==========================================================
-#  3. 미니탭 스타일 차트 (Option B 레이아웃)
+#  3. 미니탭 스타일 차트 (미니탭 기본 출력 550×370 비율, 2배 해상도)
 # ==========================================================
 
-def _draw_table(fig, x, y, title, rows, width=0.28, fs=9, rh=0.023):
-    """figure 좌표계에 테두리 있는 표를 그린다."""
-    n_rows = len(rows)
-    title_h = rh * 1.3
-    pad = rh * 0.35
-    total_h = title_h + rh * n_rows + pad
+# 기준 이미지(미니탭 기본 출력) 크기 — 모든 좌표는 이 픽셀 기준으로 잡고 figure 좌표로 변환
+_REF_W, _REF_H = 551.0, 368.0
+FIG_W_IN, FIG_H_IN = 5.51, 3.68     # inch
+FIG_DPI = 200                        # 1102 × 736 px (미니탭 출력의 정확히 2배)
+_BG = "#F1ECE2"                      # 미니탭 배경 베이지
+_FONT = "Arial"
 
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = [_FONT, "Liberation Sans", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
+
+
+def _fx(px: float) -> float:
+    return px / _REF_W
+
+
+def _fy(py: float) -> float:
+    """기준 이미지의 y(위에서 아래) → figure 좌표(아래에서 위)"""
+    return 1.0 - py / _REF_H
+
+
+def _box(fig, x0, y0, x1, y1, lw=0.8, z=5):
+    """기준 픽셀 좌표(좌상단 원점)로 흰색 테두리 박스를 그린다."""
     rect = Rectangle(
-        (x, y - total_h), width, total_h,
+        (_fx(x0), _fy(y1)), _fx(x1) - _fx(x0), _fy(y0) - _fy(y1),
         fill=True, facecolor="white", edgecolor="black",
-        linewidth=1.0, transform=fig.transFigure, zorder=5,
+        linewidth=lw, transform=fig.transFigure, zorder=z,
     )
     fig.patches.append(rect)
 
-    fig.text(
-        x + width / 2, y - title_h * 0.45, title,
-        fontsize=fs, fontweight="bold", ha="center", va="center",
-        transform=fig.transFigure, zorder=6, family="sans-serif",
-    )
 
-    line = Line2D(
-        [x, x + width], [y - title_h, y - title_h],
-        color="black", linewidth=0.5,
-        transform=fig.transFigure, zorder=6,
-    )
-    fig.lines.append(line)
+def _txt(fig, px, py, s, fs=6.2, ha="left", bold=False, color="black", z=6):
+    fig.text(_fx(px), _fy(py), s, fontsize=fs, ha=ha, va="center",
+             fontweight="bold" if bold else "normal", color=color,
+             transform=fig.transFigure, zorder=z)
 
+
+def _table(fig, x0, y0, x1, y1, title, rows, label_dx, value_dx,
+           value_ha="right", row_h=12.0, fs=6.2):
+    """제목 + (라벨, 값) 행으로 이루어진 미니탭식 표.
+
+    label_dx / value_dx : 박스 왼쪽 가장자리에서 라벨·값까지의 픽셀 거리
+    """
+    _box(fig, x0, y0, x1, y1)
+    _txt(fig, (x0 + x1) / 2, y0 + 9, title, fs=fs, ha="center")
     for i, (label, value) in enumerate(rows):
-        ry = y - title_h - rh * (i + 0.6)
-        fig.text(
-            x + 0.010, ry, label,
-            fontsize=fs - 0.5, ha="left", va="center",
-            transform=fig.transFigure, zorder=6, family="sans-serif",
-        )
-        fig.text(
-            x + width - 0.010, ry, str(value),
-            fontsize=fs - 0.5, ha="right", va="center",
-            transform=fig.transFigure, zorder=6, family="sans-serif",
-        )
+        y = y0 + 20 + i * row_h
+        _txt(fig, x0 + label_dx, y, label, fs=fs)
+        _txt(fig, x0 + value_dx, y, str(value), fs=fs, ha=value_ha)
 
-    return total_h
+
+def _fmt(v: float, sig: int = 6) -> str:
+    return f"{v:.{sig}g}"
 
 
 def create_capability_chart(test_name: str, data: np.ndarray,
                             usl: float, lsl: float, r: dict) -> plt.Figure:
-    """Option B: Process Data 좌측 | 히스토그램 중앙 | Capability 우측"""
+    """미니탭 Process Capability Report 와 같은 배치의 차트를 만든다.
 
-    fig = plt.figure(figsize=(14, 7.5))
-    fig.patch.set_facecolor("#F0ECD8")
+    좌: Process Data / 중앙: 히스토그램 / 우: 범례 + Capability 표 / 하단: PPM 표
+    """
+    fig = plt.figure(figsize=(FIG_W_IN, FIG_H_IN), dpi=FIG_DPI)
+    fig.patch.set_facecolor(_BG)
 
     mean = r["mean"]
     target = r["target"]
     sw = r["stdev_within"]
     so = r["stdev_overall"]
 
+    # ── 바깥 테두리 ──
+    fig.patches.append(Rectangle(
+        (0.0015, 0.002), 0.997, 0.996, fill=False, edgecolor="#9F9F9F",
+        linewidth=0.8, transform=fig.transFigure, zorder=10,
+    ))
+
     # ── 제목 ──
-    fig.text(
-        0.50, 0.965, test_name,
-        fontsize=13, fontweight="bold", ha="center", va="top",
-        family="sans-serif",
+    title = " ".join(str(test_name).split())
+    _txt(fig, _REF_W / 2, 18, title, fs=9.5, ha="center", bold=True)
+
+    # ── Process Data (좌측) ──
+    _table(
+        fig, 12, 63, 134, 168, "Process Data",
+        [("LSL",            _fmt(lsl)),
+         ("Target",         _fmt(target)),
+         ("USL",            _fmt(usl)),
+         ("Sample Mean",    _fmt(mean)),
+         ("Sample N",       f"{r['n']}"),
+         ("StDev(Within)",  _fmt(sw)),
+         ("StDev(Overall)", _fmt(so))],
+        label_dx=5, value_dx=68, value_ha="left",
     )
 
-    # ── Process Data — 좌측 패널 ──
-    _draw_table(
-        fig, 0.02, 0.87,
-        "Process Data",
-        [
-            ("LSL",            f"{lsl}"),
-            ("Target",         f"{target:.5g}"),
-            ("USL",            f"{usl}"),
-            ("Sample Mean",    f"{mean:.5g}"),
-            ("Sample N",       f"{r['n']}"),
-            ("StDev(Within)",  f"{sw:.7g}"),
-            ("StDev(Overall)", f"{so:.7g}"),
-        ],
-        width=0.17, fs=9.5, rh=0.028,
-    )
-
-    # ── 히스토그램 — 중앙 ──
-    ax = fig.add_axes([0.215, 0.20, 0.42, 0.67])
+    # ── 히스토그램 (중앙) ──
+    ax = fig.add_axes([_fx(148), _fy(280), _fx(405) - _fx(148), _fy(63) - _fy(280)])
     ax.set_facecolor("white")
+    for sp in ax.spines.values():
+        sp.set_visible(False)
 
     spec_range = usl - lsl
     sigma_max = max(sw, so)
@@ -289,93 +320,77 @@ def create_capability_chart(test_name: str, data: np.ndarray,
     x_hi = max(usl + spec_range * 0.08, mean + 4.5 * sigma_max)
 
     n_bins = max(int(np.sqrt(len(data))), 10)
-    ax.hist(
-        data, bins=n_bins, density=True,
-        color="#787878", edgecolor="black", linewidth=0.8,
-        alpha=1.0, zorder=3,
-    )
+    ax.hist(data, bins=n_bins, density=True,
+            color="#787878", edgecolor="black", linewidth=0.5,
+            alpha=1.0, zorder=3)
 
     x_curve = np.linspace(x_lo, x_hi, 500)
-    ax.plot(x_curve, stats.norm.pdf(x_curve, mean, sw),
-            "r-", linewidth=1.8, zorder=4)
-    ax.plot(x_curve, stats.norm.pdf(x_curve, mean, so),
-            "k--", linewidth=1.8, zorder=4)
+    ax.plot(x_curve, stats.norm.pdf(x_curve, mean, sw), "r-", linewidth=1.3, zorder=4)
+    ax.plot(x_curve, stats.norm.pdf(x_curve, mean, so), "k--", linewidth=1.3, zorder=4)
 
-    ax.axvline(lsl,    color="red",   linestyle="--", linewidth=1.5, zorder=2)
-    ax.axvline(usl,    color="red",   linestyle="--", linewidth=1.5, zorder=2)
-    ax.axvline(target, color="green", linestyle="--", linewidth=1.5, zorder=2)
-
-    yt = ax.get_ylim()[1]
-    ax.text(lsl,    yt * 1.04, "LSL",    color="red",   ha="center",
-            fontsize=9, fontweight="bold", clip_on=False)
-    ax.text(target, yt * 1.04, "Target", color="green", ha="center",
-            fontsize=9, fontweight="bold", clip_on=False)
-    ax.text(usl,    yt * 1.04, "USL",    color="red",   ha="center",
-            fontsize=9, fontweight="bold", clip_on=False)
+    ax.axvline(lsl,    color="red",   linestyle="--", linewidth=1.0, zorder=2)
+    ax.axvline(usl,    color="red",   linestyle="--", linewidth=1.0, zorder=2)
+    ax.axvline(target, color="green", linestyle="--", linewidth=1.0, zorder=2)
 
     ax.set_xlim(x_lo, x_hi)
     ax.set_ylim(bottom=0)
     ax.yaxis.set_visible(False)
-    ax.tick_params(axis="x", labelsize=9)
+    ax.tick_params(axis="x", labelsize=6.2, length=2.5, pad=2)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=8))
 
-    # ── 범례 (히스토그램 내부) ──
-    legend_handles = [
-        Line2D([0], [0], color="red",   linewidth=2, linestyle="-",  label="Within"),
-        Line2D([0], [0], color="black", linewidth=2, linestyle="--", label="Overall"),
-    ]
-    ax.legend(handles=legend_handles, loc="upper right", fontsize=9,
-              frameon=True, fancybox=False, edgecolor="black")
+    # 규격선 라벨 (플롯 바로 위, figure 좌표)
+    yl = _fy(55)
+    for xv, lab, col in ((lsl, "LSL", "red"), (target, "Target", "green"), (usl, "USL", "red")):
+        xf = ax.transData.transform((xv, 0))[0] / (FIG_W_IN * FIG_DPI)
+        fig.text(xf, yl, lab, color=col, fontsize=6.5, fontweight="bold",
+                 ha="center", va="center", transform=fig.transFigure, zorder=6)
 
-    # ── Capability 테이블 — 우측 ──
-    _draw_table(
-        fig, 0.68, 0.84,
-        "Potential (Within) Capability",
-        [("Cp", f"{r['cp']:.2f}"), ("CPL", f"{r['cpl']:.2f}"),
+    # ── 범례 (우측 상단 박스) ──
+    _box(fig, 414, 63, 490, 96)
+    for i, (col, ls, lab) in enumerate((("red", "-", "Within"), ("black", "--", "Overall"))):
+        y = 72 + i * 13
+        fig.lines.append(Line2D([_fx(420), _fx(446)], [_fy(y), _fy(y)],
+                                color=col, linestyle=ls, linewidth=1.3,
+                                transform=fig.transFigure, zorder=6))
+        _txt(fig, 451, y, lab, fs=6.2)
+
+    # ── Capability 표 (우측) ──
+    _table(
+        fig, 414, 100, 540, 161, "Potential (Within) Capability",
+        [("Cp",  f"{r['cp']:.2f}"),  ("CPL", f"{r['cpl']:.2f}"),
          ("CPU", f"{r['cpu']:.2f}"), ("Cpk", f"{r['cpk']:.2f}")],
-        width=0.29,
+        label_dx=32, value_dx=104,
     )
-
-    _draw_table(
-        fig, 0.68, 0.645,
-        "Overall Capability",
-        [("Pp", f"{r['pp']:.2f}"), ("PPL", f"{r['ppl']:.2f}"),
+    _table(
+        fig, 414, 164, 540, 240, "Overall Capability",
+        [("Pp",  f"{r['pp']:.2f}"),  ("PPL", f"{r['ppl']:.2f}"),
          ("PPU", f"{r['ppu']:.2f}"), ("Ppk", f"{r['ppk']:.2f}"),
          ("Cpm", f"{r['cpm']:.2f}")],
-        width=0.29,
+        label_dx=32, value_dx=104,
     )
 
-    # ── 하단 PPM 테이블 ──
-    btm_w = 0.29
-    _draw_table(
-        fig, 0.04, 0.15, "Observed Performance",
-        [("PPM < LSL", f"{r['ppm_lsl_obs']:.2f}"),
-         ("PPM > USL", f"{r['ppm_usl_obs']:.2f}"),
-         ("PPM Total", f"{r['ppm_total_obs']:.2f}")],
-        width=btm_w, fs=8,
-    )
-    _draw_table(
-        fig, 0.35, 0.15, "Exp. Within Performance",
-        [("PPM < LSL", f"{r['ppm_lsl_w']:.2f}"),
-         ("PPM > USL", f"{r['ppm_usl_w']:.2f}"),
-         ("PPM Total", f"{r['ppm_total_w']:.2f}")],
-        width=btm_w, fs=8,
-    )
-    _draw_table(
-        fig, 0.66, 0.15, "Exp. Overall Performance",
-        [("PPM < LSL", f"{r['ppm_lsl_o']:.2f}"),
-         ("PPM > USL", f"{r['ppm_usl_o']:.2f}"),
-         ("PPM Total", f"{r['ppm_total_o']:.2f}")],
-        width=btm_w, fs=8,
-    )
+    # ── 하단 PPM 표 ──
+    for x0, title_s, keys in (
+        (12,  "Observed Performance",     ("ppm_lsl_obs", "ppm_usl_obs", "ppm_total_obs")),
+        (128, "Exp. Within Performance",  ("ppm_lsl_w",   "ppm_usl_w",   "ppm_total_w")),
+        (245, "Exp. Overall Performance", ("ppm_lsl_o",   "ppm_usl_o",   "ppm_total_o")),
+    ):
+        _table(
+            fig, x0, 305, x0 + 108, 360, title_s,
+            [("PPM < LSL", f"{r[keys[0]]:.2f}"),
+             ("PPM > USL", f"{r[keys[1]]:.2f}"),
+             ("PPM Total", f"{r[keys[2]]:.2f}")],
+            label_dx=5, value_dx=98,
+        )
 
     plt.close(fig)
     return fig
 
 
-def fig_to_png(fig, dpi=150) -> bytes:
+def fig_to_png(fig, dpi=FIG_DPI) -> bytes:
+    """figure를 고정 크기 PNG(1102×736)로 저장한다. bbox_inches='tight'를 쓰지 않아 크기가 항상 같다."""
     buf = BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight",
-                facecolor=fig.get_facecolor())
+    fig.savefig(buf, format="png", dpi=dpi, facecolor=fig.get_facecolor())
     buf.seek(0)
     return buf.read()
 
@@ -578,7 +593,7 @@ def main():
         chart_pngs = []
         summary_rows = []
         for t in tests:
-            r = calculate_capability(t["data"], t["usl"], t["lsl"])
+            r = calculate_capability(t["data"], t["usl"], t["lsl"], t.get("target"))
             fig = create_capability_chart(t["name"], t["data"], t["usl"], t["lsl"], r)
             chart_pngs.append(fig_to_png(fig))
             summary_rows.append({
